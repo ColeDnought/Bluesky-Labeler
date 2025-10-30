@@ -1,0 +1,4 @@
+atproto
+tenacity
+requests
+python-dotenv
