@@ -1,5 +1,5 @@
 1. Create a Dataset
-    - Finish script to download feed
+    - ~~Finish script to download feed~~
     - Find feeds that frequently share misinfo
     - Feed into LLM to find likely misinfo
     - Label candidates
