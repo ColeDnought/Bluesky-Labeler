@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 from urllib.parse import urlparse
+import asyncio
+from fetch_users import get_user_info
 
 st.set_page_config(page_title="Firehose URL Dashboard", layout="wide")
 
@@ -42,6 +44,36 @@ def ensure_scheme(u):
     except Exception:
         return u
 
+@st.cache_data(ttl=300)
+def enrich_with_user_handles(df):
+    """Enrich dataframe with user handles and profile URLs for all unique authors"""
+    unique_authors = df['author'].unique()
+    user_info_df = fetch_user_handles(unique_authors)
+    
+    # Merge user info into the main dataframe
+    df_enriched = df.merge(
+        user_info_df[['did', 'handle', 'profile_url']],
+        left_on='author',
+        right_on='did',
+        how='left'
+    )
+    return df_enriched
+
+@st.cache_data(ttl=300)
+def fetch_user_handles(dids):
+    """Fetch Bluesky handles for multiple DIDs using async fetch_users"""
+    try:
+        user_df = asyncio.run(get_user_info(list(dids)))
+        return user_df
+    except Exception as e:
+        st.error(f"Error fetching handles: {e}")
+        # Return a fallback dataframe
+        return pd.DataFrame({
+            'did': list(dids),
+            'handle': list(dids),
+            'profile_url': [f"https://bsky.app/profile/{did}" for did in dids]
+        })
+
 def show_general_stats(df):
     st.header("General Statistics")
     st.write(f"Total Records: {len(df)}")
@@ -52,15 +84,21 @@ def show_general_stats(df):
     with col1:
         st.subheader("Most Common Domains")
         top_domains_series = df['domain'].value_counts().head(20)
+        
+        # Calculate unique authors per domain
+        domain_authors = df.groupby('domain')['author'].nunique().to_dict()
+        
         top_domains_df = pd.DataFrame({
             'domain': top_domains_series.index.astype(str),
             'count': top_domains_series.values
         })
+        top_domains_df['unique_authors'] = top_domains_df['domain'].map(domain_authors)
+        
         st.bar_chart(top_domains_df.set_index('domain')['count'])
 
     with col2:
         st.write("Top 20 Domains Count")
-        st.dataframe(top_domains_df)
+        st.dataframe(top_domains_df[['domain', 'count', 'unique_authors']])
 
     # Top Pages
     st.divider()
@@ -146,34 +184,62 @@ def show_suspicious_authors(df):
     
     suspicious_authors = suspicious_authors.sort_values('posts_per_minute', ascending=False)
 
-    st.subheader(f"Found {len(suspicious_authors)} Suspicious Authors")
-    
-    # Display table
-    display_cols = ['author', 'domain', 'total_posts', 'domain_share', 'duration', 'posts_per_minute']
-    st.dataframe(
-        suspicious_authors[display_cols].style.format({
-            'domain_share': '{:.1%}',
-            'posts_per_minute': '{:.2f}'
-        })
+    # Merge in the handle and profile_url from the enriched df
+    suspicious_authors = suspicious_authors.merge(
+        df[['author', 'handle', 'profile_url']].drop_duplicates('author'),
+        on='author',
+        how='left'
     )
 
-    st.divider()
-    st.subheader("Inspect Author Posts")
+    st.subheader(f"Found {len(suspicious_authors)} Suspicious Authors")
+    st.write("Click on a row to view details below.")
     
-    selected_author = st.selectbox("Select an author to view posts:", suspicious_authors['author'])
+    # Display table with selection - create a display dataframe with handle shown
+    display_df = suspicious_authors[['handle', 'domain', 'total_posts', 'duration', 'posts_per_minute']].copy()
+    display_df['profile_link'] = suspicious_authors['profile_url']
     
-    if selected_author:
-        author_posts = df[df['author'] == selected_author].sort_values('timestamp', ascending=False)
-        st.write(f"Posts by **{selected_author}** ({len(author_posts)} posts)")
+    event = st.dataframe(
+        display_df[['profile_link', 'domain', 'total_posts', 'duration', 'posts_per_minute']],
+        column_config={
+            'profile_link': st.column_config.LinkColumn('Profile'),
+            'domain': 'Top Domain',
+            'total_posts': 'Posts',
+            'duration': 'Duration',
+            'posts_per_minute': st.column_config.NumberColumn('Posts/Min', format="%.2f")
+        },
+        on_select="rerun",
+        selection_mode="single-row"
+    )
+
+    # Show details when a row is selected
+    if event.get("selection") and event["selection"].get("rows"):
+        selected_idx = event["selection"]["rows"][0]
+        selected_author = suspicious_authors.iloc[selected_idx]['author']
+        author_domain = suspicious_authors.iloc[selected_idx]['domain']
         
-        # Display posts with links
-        author_posts['url_link'] = author_posts['url'].apply(ensure_scheme)
+        st.divider()
+        st.subheader(f"Details for {selected_author}")
+        
+        author_posts = df[df['author'] == selected_author].sort_values('timestamp', ascending=False)
+        campaign_posts = author_posts[author_posts['domain'] == author_domain]
+        
+        # Get unique URLs with their counts and sample text
+        campaign_urls = campaign_posts.groupby('url').agg(
+            count=('url', 'size'),
+            text=('text', 'first')
+        ).reset_index()
+        
+        campaign_urls = campaign_urls.sort_values('count', ascending=False)
+        campaign_urls['url_link'] = campaign_urls['url'].apply(ensure_scheme)
+        
+        st.write(f"**{len(campaign_urls)} unique URLs** from **{author_domain}** ({campaign_urls['count'].sum()} total posts)")
         
         st.dataframe(
-            author_posts[['timestamp', 'url_link', 'text', 'domain']],
+            campaign_urls[['url_link', 'count', 'text']],
             column_config={
                 'url_link': st.column_config.LinkColumn('URL'),
-                'timestamp': st.column_config.DatetimeColumn('Time', format="D MMM YYYY, h:mm:ss a")
+                'count': st.column_config.NumberColumn('Times Posted'),
+                'text': st.column_config.TextColumn('Post Text')
             }
         )
 
@@ -187,6 +253,11 @@ else:
     # Apply domain extraction globally
     if 'domain' not in df.columns:
         df['domain'] = df['url'].apply(get_domain)
+    
+    # Enrich with user handles once at the start
+    if 'handle' not in df.columns:
+        with st.spinner('Fetching user handles...'):
+            df = enrich_with_user_handles(df)
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", ["General Stats", "Suspicious Authors"])
