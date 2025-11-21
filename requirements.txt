@@ -2,3 +2,7 @@ atproto
 tenacity
 requests
 python-dotenv
+ipykernel
+ipywidgets
+streamlit
+pandas
