@@ -6,3 +6,5 @@ ipykernel
 ipywidgets
 streamlit
 pandas
+scikit-learn
+matplotlib
