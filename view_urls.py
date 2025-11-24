@@ -162,8 +162,8 @@ def show_suspicious_authors(df):
 
     # 4. Filter for suspicious authors
     suspicious_authors = author_analysis[
-        (author_analysis['total_posts'] >= 5) & 
-        (author_analysis['domain_share'] >= 0.6)
+        (author_analysis['total_posts'] >= 1) & 
+        (author_analysis['domain_share'] >= 0.0)
     ].copy()
 
     if suspicious_authors.empty:
