@@ -6,6 +6,8 @@ This module provides functions for analyzing URL posting patterns in social medi
 
 import pandas as pd
 from urllib.parse import urlparse
+from sdv.single_table import GaussianCopulaSynthesizer
+from sdv.metadata import Metadata
 
 
 def load_url_data(csv_file='url_stream.csv'):
@@ -321,6 +323,25 @@ def full_analysis_pipeline(csv_file='url_stream.csv',
         'bursty_urls': bursty_urls,
         'author_stats': author_stats
     }
+
+
+def augment_data(
+        dataframe: pd.DataFrame, 
+        feature_columns: list[str], 
+        target_column: str, 
+        num_synthetic_rows: int
+    ) -> pd.DataFrame:
+    # Prepare the original test data
+    original_data = dataframe[feature_columns + [target_column]].copy()
+    metadata = Metadata.detect_from_dataframe(original_data)
+    metadata.update_column(column_name=target_column, sdtype='categorical')
+
+    # Create and train the synthesizer
+    synthesizer = GaussianCopulaSynthesizer(metadata)
+    synthesizer.fit(original_data)
+    synthetic_data = synthesizer.sample(num_rows=num_synthetic_rows)
+
+    return pd.concat([original_data, synthetic_data], ignore_index=True)
 
 
 if __name__ == '__main__':
