@@ -243,6 +243,216 @@ def show_suspicious_authors(df):
             }
         )
 
+def show_threshold_tuning():
+    """Interactive threshold tuning page with TPR/FPR metrics"""
+    st.header("Threshold Tuning")
+    st.markdown("""
+    Adjust feature thresholds to tune spam detection. Authors exceeding thresholds on normalized features
+    will be flagged as suspicious. The metrics show performance on a labeled test set.
+    """)
+    
+    # Load labeled test data
+    try:
+        labeled_df = pd.read_csv('test_data.csv')
+        labeled_df['author'] = labeled_df['link'].apply(lambda x: x.split('/')[-1])
+    except FileNotFoundError:
+        st.error("test_data.csv not found. Please create a labeled test set first.")
+        return
+    
+    # Load and prepare author stats
+    from analysis_helpers import load_url_data, add_domain_column, analyze_authors_comprehensive
+    
+    @st.cache_data
+    def get_author_stats():
+        df = load_url_data('url_stream.csv')
+        df = add_domain_column(df)
+        stats = analyze_authors_comprehensive(df, labels_df=labeled_df)
+        return stats
+    
+    with st.spinner('Loading author statistics...'):
+        author_stats = get_author_stats()
+    
+    # Fetch follower data separately using the same async pattern as enrich_with_user_data
+    @st.cache_data(ttl=300)
+    def get_follower_data_for_authors(authors_list):
+        try:
+            return asyncio.run(get_follower_ratios(authors_list))
+        except RuntimeError:
+            # Event loop already running - use nest_asyncio workaround
+            import nest_asyncio
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_follower_ratios(authors_list))
+    
+    # Only fetch follower data for labeled authors (smaller set)
+    labeled_authors = author_stats[author_stats['label'].notnull()]['author'].unique().tolist()
+    
+    if labeled_authors:
+        with st.spinner('Fetching follower data...'):
+            try:
+                follower_df = get_follower_data_for_authors(tuple(labeled_authors))
+                author_stats = author_stats.merge(
+                    follower_df[['did', 'followers_count', 'follows_count', 'follower_following_ratio']],
+                    left_on='author',
+                    right_on='did',
+                    how='left'
+                )
+                if 'did' in author_stats.columns:
+                    author_stats = author_stats.drop(columns=['did'])
+            except Exception as e:
+                st.warning(f"Could not fetch follower data: {e}")
+    
+    # Filter to only labeled data for evaluation
+    test_data = author_stats[author_stats['label'].notnull()].copy()
+    
+    if test_data.empty:
+        st.warning("No labeled authors found in the dataset.")
+        return
+    
+    # Define feature columns
+    feature_columns = ['unique_domains', 'unique_urls', 'avg_time_between_posts', 
+                       'followers_count', 'follows_count', 'follower_following_ratio']
+    
+    # Filter to available columns
+    available_features = [col for col in feature_columns if col in test_data.columns]
+    
+    if not available_features:
+        st.error("No feature columns available in the data.")
+        return
+    
+    # Normalize features for the test data
+    from sklearn.preprocessing import StandardScaler
+    
+    # Handle missing values
+    test_data_clean = test_data.dropna(subset=available_features)
+    
+    if len(test_data_clean) < len(test_data):
+        st.info(f"Dropped {len(test_data) - len(test_data_clean)} rows with missing feature values.")
+    
+    scaler = StandardScaler()
+    normalized_features = pd.DataFrame(
+        scaler.fit_transform(test_data_clean[available_features]),
+        columns=available_features,
+        index=test_data_clean.index
+    )
+    
+    st.subheader("Feature Thresholds")
+    st.markdown("Set thresholds for normalized features (z-scores). Positive = above mean, Negative = below mean.")
+    
+    # Create sliders for each feature
+    thresholds = {}
+    cols = st.columns(2)
+    
+    for i, feature in enumerate(available_features):
+        with cols[i % 2]:
+            # Different default directions based on feature semantics
+            if feature in ['followers_count', 'follower_following_ratio']:
+                # Lower values are suspicious
+                default_val = -1.0
+                help_text = f"Flag if below threshold (lower {feature} = more suspicious)"
+            else:
+                # Higher values are suspicious  
+                default_val = 1.0
+                help_text = f"Flag if above threshold (higher {feature} = more suspicious)"
+            
+            thresholds[feature] = st.slider(
+                f"{feature}",
+                min_value=-3.0,
+                max_value=3.0,
+                value=default_val,
+                step=0.1,
+                help=help_text
+            )
+    
+    # Checkbox for threshold direction
+    st.subheader("Threshold Direction")
+    threshold_directions = {}
+    cols2 = st.columns(2)
+    
+    for i, feature in enumerate(available_features):
+        with cols2[i % 2]:
+            default_above = feature not in ['followers_count', 'follower_following_ratio']
+            threshold_directions[feature] = st.checkbox(
+                f"{feature}: Flag if ABOVE threshold",
+                value=default_above,
+                key=f"dir_{feature}"
+            )
+    
+    # Calculate predictions based on thresholds
+    predictions = pd.Series([False] * len(normalized_features), index=normalized_features.index)
+    
+    for feature in available_features:
+        if threshold_directions[feature]:
+            # Flag if above threshold
+            predictions = predictions | (normalized_features[feature] > thresholds[feature])
+        else:
+            # Flag if below threshold
+            predictions = predictions | (normalized_features[feature] < thresholds[feature])
+    
+    # Get ground truth (label 'bad' or 'spam' is the positive class)
+    ground_truth = test_data_clean['label'].apply(
+        lambda x: x.lower() in ['spam', 'bad'] if isinstance(x, str) else False
+    )
+    
+    # Calculate metrics
+    true_positives = (predictions & ground_truth).sum()
+    false_positives = (predictions & ~ground_truth).sum()
+    true_negatives = (~predictions & ~ground_truth).sum()
+    false_negatives = (~predictions & ground_truth).sum()
+    
+    total_positives = ground_truth.sum()
+    total_negatives = (~ground_truth).sum()
+    
+    tpr = true_positives / total_positives if total_positives > 0 else 0
+    fpr = false_positives / total_negatives if total_negatives > 0 else 0
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+    accuracy = (true_positives + true_negatives) / len(predictions) if len(predictions) > 0 else 0
+    
+    # Display metrics
+    st.divider()
+    st.subheader("Performance Metrics")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("True Positive Rate (Recall)", f"{tpr:.2%}")
+        st.caption(f"{true_positives}/{total_positives} spam detected")
+    
+    with col2:
+        st.metric("False Positive Rate", f"{fpr:.2%}")
+        st.caption(f"{false_positives}/{total_negatives} legitimate flagged")
+    
+    with col3:
+        st.metric("Precision", f"{precision:.2%}")
+        st.caption(f"{true_positives}/{true_positives + false_positives} flagged are spam")
+    
+    with col4:
+        st.metric("Accuracy", f"{accuracy:.2%}")
+        st.caption(f"{true_positives + true_negatives}/{len(predictions)} correct")
+    
+    # Confusion matrix
+    st.subheader("Confusion Matrix")
+    confusion_df = pd.DataFrame({
+        'Predicted Spam': [true_positives, false_positives],
+        'Predicted Legitimate': [false_negatives, true_negatives]
+    }, index=['Actual Spam', 'Actual Legitimate'])
+    
+    st.dataframe(confusion_df, use_container_width=True)
+    
+    # Show flagged authors
+    st.divider()
+    st.subheader("Flagged Authors")
+    
+    flagged_authors = test_data_clean[predictions].copy()
+    flagged_authors['actual_label'] = ground_truth[predictions].map({True: 'Spam', False: 'Legitimate'})
+    
+    if not flagged_authors.empty:
+        display_cols = ['author', 'actual_label'] + available_features[:4]
+        display_cols = [c for c in display_cols if c in flagged_authors.columns]
+        st.dataframe(flagged_authors[display_cols].head(20))
+    else:
+        st.info("No authors flagged with current thresholds.")
+
 # Main App Logic
 CSV_FILE = 'url_stream.csv'
 df = load_data(CSV_FILE)
@@ -260,9 +470,11 @@ else:
             df = enrich_with_user_data(df)
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["General Stats", "Suspicious Authors"])
+    page = st.sidebar.radio("Go to", ["General Stats", "Suspicious Authors", "Threshold Tuning"])
 
     if page == "General Stats":
         show_general_stats(df)
     elif page == "Suspicious Authors":
         show_suspicious_authors(df)
+    elif page == "Threshold Tuning":
+        show_threshold_tuning()
