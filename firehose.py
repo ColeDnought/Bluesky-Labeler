@@ -151,7 +151,7 @@ def stream_firehose(results_queue: Optional[multiprocessing.Queue] = None, measu
 if __name__ == '__main__':
     import sys
 
-    filename = sys.argv[1] if len(sys.argv) > 1 else 'url_stream.csv'
+    filename = sys.argv[1] if len(sys.argv) > 1 else 'data/url_stream.csv'
 
     # Create results queue
     results_queue = multiprocessing.Queue()
