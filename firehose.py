@@ -3,14 +3,12 @@ import os
 import csv
 import time
 import signal
-import warnings
 import multiprocessing
 from types import FrameType
 from typing import Any, Generator, Optional
 
-from atproto import CAR, AtUri, FirehoseSubscribeReposClient, firehose_models, models, parse_subscribe_repos_message
+from atproto import CAR, FirehoseSubscribeReposClient, firehose_models, models, parse_subscribe_repos_message
 from atproto_client.models.app.bsky.feed.post import Record
-from atproto_client.models.com.atproto.sync.subscribe_repos import RepoOp
 
 url_finder = r'(?:https?://|www\.)\S+'
 
