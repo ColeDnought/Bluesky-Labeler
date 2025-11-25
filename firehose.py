@@ -20,10 +20,6 @@ def _filter_ops(commit: models.ComAtprotoSyncSubscribeRepos.Commit) -> Generator
             # we are only interested in created records
             continue
 
-        # uri = AtUri.from_str(f'at://{commit.repo}/{op.path}')
-
-        # create_info = {'uri': str(uri), 'cid': str(op.cid), 'author': commit.repo}
-
         record_raw_data = car.blocks.get(op.cid)
         if not record_raw_data:
             continue

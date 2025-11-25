@@ -8,6 +8,10 @@ import pandas as pd
 from urllib.parse import urlparse
 from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.metadata import Metadata
+import asyncio
+from fetch_users import get_follower_ratios
+import asyncio
+from fetch_users import get_follower_ratios
 
 
 def load_url_data(csv_file='url_stream.csv'):
@@ -268,6 +272,45 @@ def analyze_authors_comprehensive(df, labels_df=None):
     author_analysis = author_analysis.sort_values('total_posts', ascending=False)
     
     return author_analysis
+
+def populate_follower_count(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds follower/following counts and ratio to dataframe.
+    
+    Args:
+        df (pd.DataFrame): Dataframe with 'author' column containing DIDs
+        
+    Returns:
+        pd.DataFrame: Dataframe with added columns:
+            - followers_count: Number of followers
+            - follows_count: Number of accounts followed
+            - follower_following_ratio: Ratio of followers to following
+    """
+    unique_authors = df['author'].dropna().unique()
+
+    if len(unique_authors) == 0:
+        # Ensure the expected columns exist even when there is nothing to fetch
+        df = df.copy()
+        df['followers_count'] = pd.NA
+        df['follows_count'] = pd.NA
+        df['follower_following_ratio'] = pd.NA
+        return df
+
+    follower_data = asyncio.run(get_follower_ratios(list(unique_authors)))
+
+    # Merge follower data into the dataframe
+    df_enriched = df.merge(
+        follower_data[['did', 'followers_count', 'follows_count', 'follower_following_ratio']],
+        left_on='author',
+        right_on='did',
+        how='left'
+    )
+
+    # Drop the duplicate 'did' column from the merge
+    if 'did' in df_enriched.columns and 'did' not in df.columns:
+        df_enriched = df_enriched.drop(columns=['did'])
+
+    return df_enriched
 
 
 def full_analysis_pipeline(csv_file='url_stream.csv', 

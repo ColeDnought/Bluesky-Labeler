@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from urllib.parse import urlparse
 import asyncio
-from fetch_users import get_user_info
+from fetch_users import get_follower_ratios
 
 st.set_page_config(page_title="Firehose URL Dashboard", layout="wide")
 
@@ -45,34 +45,33 @@ def ensure_scheme(u):
         return u
 
 @st.cache_data(ttl=300)
-def enrich_with_user_handles(df):
-    """Enrich dataframe with user handles and profile URLs for all unique authors"""
+def enrich_with_user_data(df):
+    """Enrich dataframe with user handles, profile URLs, and follower ratios for all unique authors"""
     unique_authors = df['author'].unique()
-    user_info_df = fetch_user_handles(unique_authors)
+    
+    try:
+        # Fetch all user data including follower ratios in one call
+        user_data_df = asyncio.run(get_follower_ratios(list(unique_authors)))
+    except Exception as e:
+        st.error(f"Error fetching user data: {e}")
+        # Return a fallback dataframe
+        user_data_df = pd.DataFrame({
+            'did': list(unique_authors),
+            'handle': list(unique_authors),
+            'profile_url': [f"https://bsky.app/profile/{did}" for did in unique_authors],
+            'followers_count': [None] * len(unique_authors),
+            'follows_count': [None] * len(unique_authors),
+            'follower_following_ratio': [None] * len(unique_authors)
+        })
     
     # Merge user info into the main dataframe
     df_enriched = df.merge(
-        user_info_df[['did', 'handle', 'profile_url']],
+        user_data_df[['did', 'handle', 'profile_url', 'follower_following_ratio']],
         left_on='author',
         right_on='did',
         how='left'
     )
     return df_enriched
-
-@st.cache_data(ttl=300)
-def fetch_user_handles(dids):
-    """Fetch Bluesky handles for multiple DIDs using async fetch_users"""
-    try:
-        user_df = asyncio.run(get_user_info(list(dids)))
-        return user_df
-    except Exception as e:
-        st.error(f"Error fetching handles: {e}")
-        # Return a fallback dataframe
-        return pd.DataFrame({
-            'did': list(dids),
-            'handle': list(dids),
-            'profile_url': [f"https://bsky.app/profile/{did}" for did in dids]
-        })
 
 def show_general_stats(df):
     st.header("General Statistics")
@@ -184,9 +183,9 @@ def show_suspicious_authors(df):
     
     suspicious_authors = suspicious_authors.sort_values('posts_per_minute', ascending=False)
 
-    # Merge in the handle and profile_url from the enriched df
+    # Merge in the handle, profile_url, and follower_following_ratio from the enriched df
     suspicious_authors = suspicious_authors.merge(
-        df[['author', 'handle', 'profile_url']].drop_duplicates('author'),
+        df[['author', 'handle', 'profile_url', 'follower_following_ratio']].drop_duplicates('author'),
         on='author',
         how='left'
     )
@@ -195,17 +194,18 @@ def show_suspicious_authors(df):
     st.write("Click on a row to view details below.")
     
     # Display table with selection - create a display dataframe with handle shown
-    display_df = suspicious_authors[['handle', 'domain', 'total_posts', 'duration', 'posts_per_minute']].copy()
+    display_df = suspicious_authors[['handle', 'domain', 'total_posts', 'duration', 'posts_per_minute', 'follower_following_ratio']].copy()
     display_df['profile_link'] = suspicious_authors['profile_url']
     
     event = st.dataframe(
-        display_df[['profile_link', 'domain', 'total_posts', 'duration', 'posts_per_minute']],
+        display_df[['profile_link', 'domain', 'total_posts', 'duration', 'posts_per_minute', 'follower_following_ratio']],
         column_config={
             'profile_link': st.column_config.LinkColumn('Profile'),
             'domain': 'Top Domain',
             'total_posts': 'Posts',
             'duration': 'Duration',
-            'posts_per_minute': st.column_config.NumberColumn('Posts/Min', format="%.2f")
+            'posts_per_minute': st.column_config.NumberColumn('Posts/Min', format="%.2f"),
+            'follower_following_ratio': st.column_config.NumberColumn('Follower:Following', format="%.2f")
         },
         on_select="rerun",
         selection_mode="single-row"
@@ -254,10 +254,10 @@ else:
     if 'domain' not in df.columns:
         df['domain'] = df['url'].apply(get_domain)
     
-    # Enrich with user handles once at the start
+    # Enrich with user data (handles, profile URLs, follower ratios) once at the start
     if 'handle' not in df.columns:
-        with st.spinner('Fetching user handles...'):
-            df = enrich_with_user_handles(df)
+        with st.spinner('Fetching user data...'):
+            df = enrich_with_user_data(df)
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", ["General Stats", "Suspicious Authors"])
