@@ -279,7 +279,8 @@ def show_classifier_page():
     # Import classifier functions
     from run_tests import (
         load_model, 
-        run_inference_on_feature_data,
+        run_inference,
+        compute_stats,
     )
     
     # Threshold slider
@@ -351,7 +352,8 @@ def show_classifier_page():
         if st.button("🚀 Run Classification", type="primary"):
             with st.spinner("Running classification..."):
                 try:
-                    precision, recall = run_inference_on_feature_data(default_test_file, threshold=threshold)
+                    predictions = run_inference(df, threshold=threshold)
+                    precision, recall = compute_stats(predictions, df['label'])
                     
                     # Display results
                     st.divider()
@@ -366,6 +368,27 @@ def show_classifier_page():
                         st.metric("Spam Precision", f"{precision:.1%}")
                     with col3:
                         st.metric("Spam Recall", f"{recall:.1%}")
+                    
+                    # Per-item results
+                    st.subheader("Per-Item Results")
+                    
+                    results_df = df.copy()
+                    results_df['prediction'] = predictions
+                    results_df['correct'] = results_df['prediction'] == results_df['label']
+                    
+                    # Color-code by correctness
+                    st.dataframe(
+                        results_df[['label', 'prediction', 'correct', 'unique_domains', 'unique_urls', 'followers_count', 'follows_count']],
+                        column_config={
+                            'label': st.column_config.TextColumn('Actual'),
+                            'prediction': st.column_config.TextColumn('Predicted'),
+                            'correct': st.column_config.CheckboxColumn('Correct'),
+                            'unique_domains': st.column_config.NumberColumn('Domains'),
+                            'unique_urls': st.column_config.NumberColumn('URLs'),
+                            'followers_count': st.column_config.NumberColumn('Followers', format="%.0f"),
+                            'follows_count': st.column_config.NumberColumn('Following', format="%.0f"),
+                        }
+                    )
                     
                 except Exception as e:
                     st.error(f"Error running classification: {e}")
@@ -397,18 +420,8 @@ def show_classifier_page():
             if st.button("🚀 Run Classification", type="primary"):
                 with st.spinner("Running classification..."):
                     try:
-                        # Save uploaded file temporarily
-                        import tempfile
-                        import os
-                        
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp:
-                            df.to_csv(tmp.name, index=False)
-                            tmp_path = tmp.name
-                        
-                        try:
-                            precision, recall = run_inference_on_feature_data(tmp_path, threshold=threshold)
-                        finally:
-                            os.unlink(tmp_path)
+                        predictions = run_inference(df, threshold=threshold)
+                        precision, recall = compute_stats(predictions, df['label'])
                         
                         # Display results
                         st.divider()
@@ -423,6 +436,28 @@ def show_classifier_page():
                             st.metric("Spam Precision", f"{precision:.1%}")
                         with col3:
                             st.metric("Spam Recall", f"{recall:.1%}")
+                        
+                        # Per-item results
+                        st.subheader("Per-Item Results")
+                        
+                        results_df = df.copy()
+                        results_df['prediction'] = predictions
+                        results_df['correct'] = results_df['prediction'] == results_df['label']
+                        
+                        # Color-code by correctness
+                        st.dataframe(
+                            results_df[['label', 'prediction', 'correct', 'unique_domains', 'unique_urls', 'followers_count', 'follows_count']],
+                            column_config={
+                                'label': st.column_config.TextColumn('Actual'),
+                                'prediction': st.column_config.TextColumn('Predicted'),
+                                'correct': st.column_config.CheckboxColumn('Correct'),
+                                'unique_domains': st.column_config.NumberColumn('Domains'),
+                                'unique_urls': st.column_config.NumberColumn('URLs'),
+                                'followers_count': st.column_config.NumberColumn('Followers', format="%.0f"),
+                                'follows_count': st.column_config.NumberColumn('Following', format="%.0f"),
+                            },
+                            use_container_width=True
+                        )
                         
                     except Exception as e:
                         st.error(f"Error running classification: {e}")
