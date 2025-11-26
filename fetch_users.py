@@ -24,7 +24,7 @@ async def fetch_single_user(client, did):
             'handle': handle,
             'profile_url': profile_url
         }
-    except Exception as e:
+    except Exception:
         # If we can't resolve, keep the DID
         return {
             'did': did,
@@ -39,8 +39,8 @@ async def fetch_user_with_ratio(client, did):
         # Get the full profile with follower/following counts
         profile = await client.app.bsky.actor.get_profile({'actor': did})
         
-        followers_count = profile.followers_count or 0.1
-        follows_count = profile.follows_count or 0.1
+        followers_count = profile.followers_count or 1
+        follows_count = profile.follows_count or 1
         
         return {
             'did': did,

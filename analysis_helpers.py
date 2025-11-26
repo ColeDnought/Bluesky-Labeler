@@ -10,8 +10,6 @@ from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.metadata import Metadata
 import asyncio
 from fetch_users import get_follower_ratios
-import asyncio
-from fetch_users import get_follower_ratios
 
 
 def load_url_data(csv_file='url_stream.csv'):
@@ -372,19 +370,54 @@ def augment_data(
         dataframe: pd.DataFrame, 
         feature_columns: list[str], 
         target_column: str, 
-        num_synthetic_rows: int
+        num_synthetic_rows: int,
     ) -> pd.DataFrame:
-    # Prepare the original test data
+    """
+    Generate synthetic data to augment training set.
+    
+    Args:
+        dataframe: Original data with features and target
+        feature_columns: List of feature column names
+        target_column: Name of the target/label column
+        num_synthetic_rows: Number of synthetic rows to generate
+        per_class: If True, generate num_synthetic_rows PER CLASS to preserve
+                   class distributions. If False, generate total rows.
+    
+    Returns:
+        DataFrame with synthetic data (does not include original data)
+    """
+    from sdv.single_table import CTGANSynthesizer
+    
     original_data = dataframe[feature_columns + [target_column]].copy()
-    metadata = Metadata.detect_from_dataframe(original_data)
-    metadata.update_column(column_name=target_column, sdtype='categorical')
-
-    # Create and train the synthesizer
-    synthesizer = GaussianCopulaSynthesizer(metadata)
-    synthesizer.fit(original_data)
-    synthetic_data = synthesizer.sample(num_rows=num_synthetic_rows)
-
-    return pd.concat([original_data, synthetic_data], ignore_index=True)
+    
+    # Generate synthetic data separately for each class to preserve distributions
+    synthetic_parts = []
+    
+    for label in original_data[target_column].unique():
+        class_data = original_data[original_data[target_column] == label].copy()
+        
+        if len(class_data) < 3:
+            # Not enough data to synthesize, just duplicate
+            synthetic_parts.append(class_data.sample(n=num_synthetic_rows, replace=True))
+            continue
+        
+        metadata = Metadata.detect_from_dataframe(class_data)
+        metadata.update_column(column_name=target_column, sdtype='categorical')
+        
+        # Use CTGAN for better handling of non-Gaussian distributions
+        try:
+            synthesizer = CTGANSynthesizer(metadata, epochs=300, verbose=False)
+            synthesizer.fit(class_data)
+            synthetic_class = synthesizer.sample(num_rows=num_synthetic_rows)
+        except Exception:
+            # Fallback to GaussianCopula if CTGAN fails
+            synthesizer = GaussianCopulaSynthesizer(metadata)
+            synthesizer.fit(class_data)
+            synthetic_class = synthesizer.sample(num_rows=num_synthetic_rows)
+        
+        synthetic_parts.append(synthetic_class)
+    
+    return pd.concat(synthetic_parts, ignore_index=True)
 
 
 if __name__ == '__main__':

@@ -1,13 +1,16 @@
+from warnings import filterwarnings
+filterwarnings("ignore", module="pydantic")
 import streamlit as st
 import pandas as pd
 from urllib.parse import urlparse
 import asyncio
 from fetch_users import get_follower_ratios
 
-st.set_page_config(page_title="Firehose URL Dashboard", layout="wide")
+TITLE = "Bluesky Spam Detection Dashboard"
 
-st.title("Firehose URL Stream Dashboard")
+st.set_page_config(page_title=TITLE, layout="wide")
 
+st.title(TITLE)
 @st.cache_data
 def load_data(csv_path):
     try:
@@ -139,10 +142,29 @@ def show_suspicious_authors(df):
     st.header("Suspicious Authors Analysis")
     st.markdown("""
     This page identifies authors who post frequently, often linking to the same domain.
-    **Criteria:**
-    - At least 5 posts
-    - At least 60% of posts are to the same domain
+    Adjust the criteria below to tune the detection sensitivity.
     """)
+    
+    # User-adjustable criteria
+    col1, col2 = st.columns(2)
+    with col1:
+        min_posts = st.slider(
+            "Minimum number of posts",
+            min_value=1,
+            max_value=50,
+            value=5,
+            help="Authors must have at least this many posts to be considered suspicious"
+        )
+    with col2:
+        min_domain_share = st.slider(
+            "Minimum % posts to same domain",
+            min_value=0,
+            max_value=100,
+            value=60,
+            help="Authors must have at least this percentage of posts to the same domain"
+        )
+    
+    st.divider()
 
     # 1. Calculate stats per author
     author_stats = df.groupby('author').agg(
@@ -159,10 +181,10 @@ def show_suspicious_authors(df):
     author_analysis = pd.merge(author_stats, top_domains, on='author')
     author_analysis['domain_share'] = author_analysis['domain_count'] / author_analysis['total_posts']
 
-    # 4. Filter for suspicious authors
+    # 4. Filter for suspicious authors using dynamic criteria
     suspicious_authors = author_analysis[
-        (author_analysis['total_posts'] >= 1) & 
-        (author_analysis['domain_share'] >= 0.0)
+        (author_analysis['total_posts'] >= min_posts) & 
+        (author_analysis['domain_share'] >= min_domain_share / 100.0)
     ].copy()
 
     if suspicious_authors.empty:
@@ -243,223 +265,193 @@ def show_suspicious_authors(df):
             }
         )
 
-def show_threshold_tuning():
-    """Interactive threshold tuning page with TPR/FPR metrics"""
-    st.header("Threshold Tuning")
+def show_classifier_page():
+    """Page for running the trained classifier on uploaded CSV files"""
+    st.header("Spam Classifier")
     st.markdown("""
-    Adjust feature thresholds to tune spam detection. Authors exceeding thresholds on normalized features
-    will be flagged as suspicious. The metrics show performance on a labeled test set.
+    Run spam classification using the trained decision tree model.
+    
+    **Supported file formats:**
+    - **Feature data**: CSV with columns `unique_domains`, `unique_urls`, `followers_count`, `follows_count` (and optionally `label`)
+    - **Test data**: CSV with `link` column containing Bluesky profile URLs (e.g., `https://bsky.app/profile/did:plc:xxx`)
     """)
     
-    # Load labeled test data
+    # Import classifier functions
+    from run_tests import (
+        load_model, 
+        run_inference_on_feature_data,
+    )
+    
+    # Threshold slider
+    st.subheader("Classification Settings")
+    
     try:
-        labeled_df = pd.read_csv('test_data.csv')
-        labeled_df['author'] = labeled_df['link'].apply(lambda x: x.split('/')[-1])
-    except FileNotFoundError:
-        st.error("test_data.csv not found. Please create a labeled test set first.")
-        return
+        _, _, config = load_model()
+        default_threshold = config.get('threshold', 0.5)
+    except Exception:
+        default_threshold = 0.5
     
-    # Load and prepare author stats
-    from analysis_helpers import load_url_data, add_domain_column, analyze_authors_comprehensive
-    
-    @st.cache_data
-    def get_author_stats():
-        df = load_url_data('url_stream.csv')
-        df = add_domain_column(df)
-        stats = analyze_authors_comprehensive(df, labels_df=labeled_df)
-        return stats
-    
-    with st.spinner('Loading author statistics...'):
-        author_stats = get_author_stats()
-    
-    # Fetch follower data separately using the same async pattern as enrich_with_user_data
-    @st.cache_data(ttl=300)
-    def get_follower_data_for_authors(authors_list):
-        try:
-            return asyncio.run(get_follower_ratios(authors_list))
-        except RuntimeError:
-            # Event loop already running - use nest_asyncio workaround
-            import nest_asyncio
-            nest_asyncio.apply()
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_follower_ratios(authors_list))
-    
-    # Only fetch follower data for labeled authors (smaller set)
-    labeled_authors = author_stats[author_stats['label'].notnull()]['author'].unique().tolist()
-    
-    if labeled_authors:
-        with st.spinner('Fetching follower data...'):
-            try:
-                follower_df = get_follower_data_for_authors(tuple(labeled_authors))
-                author_stats = author_stats.merge(
-                    follower_df[['did', 'followers_count', 'follows_count', 'follower_following_ratio']],
-                    left_on='author',
-                    right_on='did',
-                    how='left'
-                )
-                if 'did' in author_stats.columns:
-                    author_stats = author_stats.drop(columns=['did'])
-            except Exception as e:
-                st.warning(f"Could not fetch follower data: {e}")
-    
-    # Filter to only labeled data for evaluation
-    test_data = author_stats[author_stats['label'].notnull()].copy()
-    
-    if test_data.empty:
-        st.warning("No labeled authors found in the dataset.")
-        return
-    
-    # Define feature columns
-    feature_columns = ['unique_domains', 'unique_urls', 'avg_time_between_posts', 
-                       'followers_count', 'follows_count', 'follower_following_ratio']
-    
-    # Filter to available columns
-    available_features = [col for col in feature_columns if col in test_data.columns]
-    
-    if not available_features:
-        st.error("No feature columns available in the data.")
-        return
-    
-    # Normalize features for the test data
-    from sklearn.preprocessing import StandardScaler
-    
-    # Handle missing values
-    test_data_clean = test_data.dropna(subset=available_features)
-    
-    if len(test_data_clean) < len(test_data):
-        st.info(f"Dropped {len(test_data) - len(test_data_clean)} rows with missing feature values.")
-    
-    scaler = StandardScaler()
-    normalized_features = pd.DataFrame(
-        scaler.fit_transform(test_data_clean[available_features]),
-        columns=available_features,
-        index=test_data_clean.index
+    threshold = st.slider(
+        "Classification Threshold",
+        min_value=0.0,
+        max_value=1.0,
+        value=default_threshold,
+        step=0.05,
+        help="Higher threshold = more conservative (fewer false positives, but may miss some spam)"
     )
     
-    st.subheader("Feature Thresholds")
-    st.markdown("Set thresholds for normalized features (z-scores). Positive = above mean, Negative = below mean.")
+    # Data source selection
+    st.subheader("Data Source")
     
-    # Create sliders for each feature
-    thresholds = {}
-    cols = st.columns(2)
+    default_test_file = 'data/test_data.csv'
+    use_default = st.checkbox(
+        f"Use default test file (`{default_test_file}`)", 
+        value=True,
+        help="Uncheck to upload a custom CSV file"
+    )
     
-    for i, feature in enumerate(available_features):
-        with cols[i % 2]:
-            # Different default directions based on feature semantics
-            if feature in ['followers_count', 'follower_following_ratio']:
-                # Lower values are suspicious
-                default_val = -1.0
-                help_text = f"Flag if below threshold (lower {feature} = more suspicious)"
-            else:
-                # Higher values are suspicious  
-                default_val = 1.0
-                help_text = f"Flag if above threshold (higher {feature} = more suspicious)"
-            
-            thresholds[feature] = st.slider(
-                f"{feature}",
-                min_value=-3.0,
-                max_value=3.0,
-                value=default_val,
-                step=0.1,
-                help=help_text
-            )
+    # File uploader (only shown if not using default)
+    uploaded_file = None
+    if not use_default:
+        uploaded_file = st.file_uploader(
+            "Choose a CSV file",
+            type=['csv'],
+            help="Upload a CSV file with feature data or profile links"
+        )
     
-    # Checkbox for threshold direction
-    st.subheader("Threshold Direction")
-    threshold_directions = {}
-    cols2 = st.columns(2)
-    
-    for i, feature in enumerate(available_features):
-        with cols2[i % 2]:
-            default_above = feature not in ['followers_count', 'follower_following_ratio']
-            threshold_directions[feature] = st.checkbox(
-                f"{feature}: Flag if ABOVE threshold",
-                value=default_above,
-                key=f"dir_{feature}"
-            )
-    
-    # Calculate predictions based on thresholds
-    predictions = pd.Series([False] * len(normalized_features), index=normalized_features.index)
-    
-    for feature in available_features:
-        if threshold_directions[feature]:
-            # Flag if above threshold
-            predictions = predictions | (normalized_features[feature] > thresholds[feature])
+    # Determine which file to use
+    if use_default:
+        # Use default test file
+        import os
+        if not os.path.exists(default_test_file):
+            st.error(f"Default test file `{default_test_file}` not found.")
+            return
+        
+        df = pd.read_csv(default_test_file)
+        
+        st.write(f"**Using:** `{default_test_file}`")
+        st.write(f"**Rows:** {len(df)}, **Columns:** {list(df.columns)}")
+        
+        # Show preview
+        with st.expander("Preview data"):
+            st.dataframe(df.head(10))
+        
+        # Detect file format
+        if 'unique_domains' in df.columns and 'unique_urls' in df.columns:
+            file_format = 'feature_data'
+        elif 'link' in df.columns:
+            file_format = 'test_data'
         else:
-            # Flag if below threshold
-            predictions = predictions | (normalized_features[feature] < thresholds[feature])
+            st.error("Unknown file format in default test file.")
+            return
+        
+        st.info(f"Detected format: **{file_format}**")
+        
+        # Run classification button
+        if st.button("🚀 Run Classification", type="primary"):
+            with st.spinner("Running classification..."):
+                try:
+                    precision, recall = run_inference_on_feature_data(default_test_file, threshold=threshold)
+                    
+                    # Display results
+                    st.divider()
+                    st.subheader("Classification Results")
+                    
+                    # Summary metrics
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Threshold Used", f"{threshold:.2f}")
+                    with col2:
+                        st.metric("Spam Precision", f"{precision:.1%}")
+                    with col3:
+                        st.metric("Spam Recall", f"{recall:.1%}")
+                    
+                except Exception as e:
+                    st.error(f"Error running classification: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
     
-    # Get ground truth (label 'bad' or 'spam' is the positive class)
-    ground_truth = test_data_clean['label'].apply(
-        lambda x: x.lower() in ['spam', 'bad'] if isinstance(x, str) else False
-    )
+    elif uploaded_file is not None:
+        try:
+            # Read the uploaded file
+            df = pd.read_csv(uploaded_file)
+            
+            st.write(f"**Uploaded file:** {uploaded_file.name}")
+            st.write(f"**Rows:** {len(df)}, **Columns:** {list(df.columns)}")
+            
+            # Show preview
+            with st.expander("Preview uploaded data"):
+                st.dataframe(df.head(10))
+            
+            # Detect file format
+            if 'unique_domains' in df.columns and 'unique_urls' in df.columns:
+                file_format = 'feature_data'
+            else:
+                st.error("Unknown file format. Please upload a CSV with feature columns (unique_domains, unique_urls, followers_count, follows_count, label)")
+                return
+            
+            st.info(f"Detected format: **{file_format}**")
+            
+            # Run classification button
+            if st.button("🚀 Run Classification", type="primary"):
+                with st.spinner("Running classification..."):
+                    try:
+                        # Save uploaded file temporarily
+                        import tempfile
+                        import os
+                        
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp:
+                            df.to_csv(tmp.name, index=False)
+                            tmp_path = tmp.name
+                        
+                        try:
+                            precision, recall = run_inference_on_feature_data(tmp_path, threshold=threshold)
+                        finally:
+                            os.unlink(tmp_path)
+                        
+                        # Display results
+                        st.divider()
+                        st.subheader("Classification Results")
+                        
+                        # Summary metrics
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("Threshold Used", f"{threshold:.2f}")
+                        with col2:
+                            st.metric("Spam Precision", f"{precision:.1%}")
+                        with col3:
+                            st.metric("Spam Recall", f"{recall:.1%}")
+                        
+                    except Exception as e:
+                        st.error(f"Error running classification: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+        
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
     
-    # Calculate metrics
-    true_positives = (predictions & ground_truth).sum()
-    false_positives = (predictions & ~ground_truth).sum()
-    true_negatives = (~predictions & ~ground_truth).sum()
-    false_negatives = (~predictions & ground_truth).sum()
-    
-    total_positives = ground_truth.sum()
-    total_negatives = (~ground_truth).sum()
-    
-    tpr = true_positives / total_positives if total_positives > 0 else 0
-    fpr = false_positives / total_negatives if total_negatives > 0 else 0
-    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-    accuracy = (true_positives + true_negatives) / len(predictions) if len(predictions) > 0 else 0
-    
-    # Display metrics
+    # Example section
     st.divider()
-    st.subheader("Performance Metrics")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("True Positive Rate (Recall)", f"{tpr:.2%}")
-        st.caption(f"{true_positives}/{total_positives} spam detected")
-    
-    with col2:
-        st.metric("False Positive Rate", f"{fpr:.2%}")
-        st.caption(f"{false_positives}/{total_negatives} legitimate flagged")
-    
-    with col3:
-        st.metric("Precision", f"{precision:.2%}")
-        st.caption(f"{true_positives}/{true_positives + false_positives} flagged are spam")
-    
-    with col4:
-        st.metric("Accuracy", f"{accuracy:.2%}")
-        st.caption(f"{true_positives + true_negatives}/{len(predictions)} correct")
-    
-    # Confusion matrix
-    st.subheader("Confusion Matrix")
-    confusion_df = pd.DataFrame({
-        'Predicted Spam': [true_positives, false_positives],
-        'Predicted Legitimate': [false_negatives, true_negatives]
-    }, index=['Actual Spam', 'Actual Legitimate'])
-    
-    st.dataframe(confusion_df, use_container_width=True)
-    
-    # Show flagged authors
-    st.divider()
-    st.subheader("Flagged Authors")
-    
-    flagged_authors = test_data_clean[predictions].copy()
-    flagged_authors['actual_label'] = ground_truth[predictions].map({True: 'Spam', False: 'Legitimate'})
-    
-    if not flagged_authors.empty:
-        display_cols = ['author', 'actual_label'] + available_features[:4]
-        display_cols = [c for c in display_cols if c in flagged_authors.columns]
-        st.dataframe(flagged_authors[display_cols].head(20))
-    else:
-        st.info("No authors flagged with current thresholds.")
+    st.subheader("Example Files")
+    st.markdown("""
+    **Feature data format** (`data/test_data.csv`):
+    ```csv
+    unique_domains,unique_urls,avg_time_between_posts,followers_count,follows_count,follower_following_ratio,label
+    1,5,8935.7,0.1,18437.6,0.05,good
+    1,7,12389.7,7798.0,2678.5,819.7,good
+    1,2,106.0,106.0,4010.4,0.05,spam
+    ```
+    """)
+
 
 # Main App Logic
-CSV_FILE = 'url_stream.csv'
+CSV_FILE = 'data/url_stream.csv'
 df = load_data(CSV_FILE)
 
-if df is None:
-    st.error(f"File {CSV_FILE} not found. Please run the firehose script first.")
-else:
+# Apply data transformations if data exists
+if df is not None:
     # Apply domain extraction globally
     if 'domain' not in df.columns:
         df['domain'] = df['url'].apply(get_domain)
@@ -469,12 +461,18 @@ else:
         with st.spinner('Fetching user data...'):
             df = enrich_with_user_data(df)
 
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["General Stats", "Suspicious Authors", "Threshold Tuning"])
+# Always show navigation sidebar
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Suspicious Authors", "Run Classifier", "General Stats"])
 
-    if page == "General Stats":
-        show_general_stats(df)
-    elif page == "Suspicious Authors":
-        show_suspicious_authors(df)
-    elif page == "Threshold Tuning":
-        show_threshold_tuning()
+# Handle page routing
+if page == "Run Classifier":
+    # Run Classifier doesn't need url_stream.csv data
+    show_classifier_page()
+elif df is None:
+    st.error(f"File `{CSV_FILE}` not found. Please run the firehose script first to collect data.")
+    st.info("You can still use the **Run Classifier** page to test uploaded CSV files.")
+elif page == "Suspicious Authors":
+    show_suspicious_authors(df)
+elif page == "General Stats":
+    show_general_stats(df)

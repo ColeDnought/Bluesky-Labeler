@@ -1,4 +1,7 @@
-from sklearn.metrics import classification_report
+from warnings import filterwarnings
+filterwarnings("ignore", module="pydantic")
+
+from sklearn.metrics import precision_score, recall_score
 import pandas as pd
 import numpy as np
 import joblib
@@ -141,13 +144,14 @@ def run_inference_on_file(input_file: str, threshold: Optional[float] = None) ->
         print("Fetching follower counts...")
         author_stats = populate_follower_count(author_stats)
     
-    # Run predictions
-    results = predict(author_stats, classifier, scaler, config, threshold)
+    
+    # Print spam metrics
+    print_spam_metrics(results)
     
     return results
 
 
-def run_inference_on_test_data(input_file: str, url_stream_file: str = 'url_stream.csv', threshold: Optional[float] = None) -> pd.DataFrame:
+def run_inference_on_test_data(input_file: str, url_stream_file: str = 'data/url_stream.csv', threshold: Optional[float] = None) -> pd.DataFrame:
     """
     Run inference on test data CSV with profile links.
     
@@ -200,6 +204,9 @@ def run_inference_on_test_data(input_file: str, url_stream_file: str = 'url_stre
     # Step 5: Run predictions
     results = predict(test_data, classifier, scaler, config, threshold)
     
+    # Print spam metrics
+    print_spam_metrics(results)
+    
     return results
 
 
@@ -248,7 +255,12 @@ def run_inference_profile_only(input_file: str, threshold: Optional[float] = Non
         if col in df.columns:
             df[col] = df[col].fillna(0)
     
-    return predict(df, classifier, scaler, config, threshold)
+    results = predict(df, classifier, scaler, config, threshold)
+    
+    # Print spam metrics
+    print_spam_metrics(results)
+    
+    return results
 
 
 def classify_authors(author_stats: pd.DataFrame, threshold: Optional[float] = None) -> pd.DataFrame:
@@ -266,7 +278,36 @@ def classify_authors(author_stats: pd.DataFrame, threshold: Optional[float] = No
     return predict(author_stats, classifier, scaler, config, threshold)
 
 
-def run_inference_on_feature_data(input_file: str, threshold: Optional[float] = None) -> pd.DataFrame:
+def print_spam_metrics(results: pd.DataFrame) -> None:
+    """
+    Print precision and recall for spam label only.
+    
+    Args:
+        results: DataFrame with 'prediction' and 'label' columns
+    """
+    if 'label' not in results.columns:
+        return
+    
+    from sklearn.metrics import precision_score, recall_score
+    
+    precision = precision_score(
+        results['label'], 
+        results['prediction'], 
+        pos_label='spam',
+        zero_division=0
+    )
+    recall = recall_score(
+        results['label'], 
+        results['prediction'], 
+        pos_label='spam',
+        zero_division=0
+    )
+    
+    print(f"Spam Precision: {precision:.1%}")
+    print(f"Spam Recall: {recall:.1%}")
+
+
+def run_inference_on_feature_data(input_file: str, threshold: Optional[float] = None) -> tuple[float, float]:
     """
     Run inference on a CSV file that already has feature columns.
     
@@ -278,28 +319,38 @@ def run_inference_on_feature_data(input_file: str, threshold: Optional[float] = 
         threshold: Optional threshold override (uses config threshold if None)
     
     Returns:
-        DataFrame with predictions
+        Tuple containing precision and recall for spam label
     """
     # Load model
     classifier, scaler, config = load_model()
+
+    # Set threshold
+    threshold = threshold if threshold is not None else config['threshold']
     
     # Load data
-    print(f"Loading feature data from {input_file}...")
     df = pd.read_csv(input_file)
-    print(f"Found {len(df)} samples")
+    X_test = scaler.transform(df[config['feature_columns']])
+    y_test = df['label']
     
     # Run predictions
-    results = predict(df, classifier, scaler, config, threshold)
+    classes = list(classifier.classes_)
+    spam_idx = classes.index('spam')
+    y_probs = classifier.predict_proba(X_test)
+
+    y_probs = np.where(y_probs[:, spam_idx] >= threshold, 'spam', 'good')
+
+    precision = precision_score(y_test, y_probs, pos_label='spam', zero_division=1)
+    recall = recall_score(y_test, y_probs, pos_label='spam', zero_division=1)
     
-    return results
+    return precision, recall
 
 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Run spam classification on URL data or test data')
-    parser.add_argument('input_file', nargs='?', default='url_stream.csv',
-                        help='Input CSV file (url_stream format, test_data format with profile links, or feature data)')
+    parser.add_argument('input_file', nargs='?', default='data/url_stream.csv',
+                        help='Input CSV file (url_stream format, or test_data format)')
     parser.add_argument('--output', type=str, default=None,
                         help='Output CSV file for results')
     parser.add_argument('--threshold', type=float, default=None,
@@ -311,32 +362,13 @@ if __name__ == "__main__":
         print(f"Using custom threshold: {args.threshold}")
     
     # Detect file format and run appropriate inference
-    file_format = detect_file_format(args.input_file)
-    print(f"Detected file format: {file_format}")
-    
-    if file_format == 'test_data':
-        results = run_inference_on_test_data(args.input_file, threshold=args.threshold)
-    elif file_format == 'feature_data':
-        results = run_inference_on_feature_data(args.input_file, threshold=args.threshold)
-    else:
-        results = run_inference_on_file(args.input_file, threshold=args.threshold)
+    print("Loading data...")
+    precision, recall = run_inference_on_feature_data(args.input_file, threshold=args.threshold)
     
     # Display summary
     print("\n" + "=" * 60)
     print("CLASSIFICATION RESULTS")
     print("=" * 60)
-    print(f"Total authors: {len(results)}")
-    print(f"Predicted spam: {(results['prediction'] == 'spam').sum()}")
-    print(f"Predicted good: {(results['prediction'] == 'good').sum()}")
-    print(f"Threshold used: {results['threshold_used'].iloc[0]}")
-    
-    # Show classification report if ground truth labels are available
-    if 'label' in results.columns:       
-        print(f"\nClassification Report (threshold = {results['threshold_used'].iloc[0]})")
-        print("=" * 50)
-        print(classification_report(results['label'], results['prediction'], target_names=['good', 'spam'], zero_division=1))
-    
-    # Save results if output specified
-    if args.output:
-        results.to_csv(args.output, index=False)
-        print(f"\nResults saved to {args.output}")
+    print(f"\tPrecision: {precision:.1%}")
+    print(f"\tRecall: {recall:.1%}")
+    print("=" * 60)
