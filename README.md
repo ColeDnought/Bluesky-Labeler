@@ -1,5 +1,7 @@
 # Bluesky Spam Account Classifier
 ### Team 8 | Sara Frazer, Om Kamath, Cole Donat
+https://github.com/ColeDnought/Bluesky-Labeler
+https://bluesky-spam-labeler.streamlit.app/
 
 
 ## Testing
@@ -11,7 +13,7 @@ To view test outputs in terminal: `python policy_proposal_labeler.py`
 
 Tests can also be run on the **Run Classifier** page of the Streamlit app: `streamlit run app.py`
 
-- Or on our hosted app: [https://bluesky-spam-labeler.streamlit.app/](https://bluesky-spam-labeler.streamlit.app/)
+- Or on our [hosted streamlit app](https://bluesky-spam-labeler.streamlit.app/)
 
 ## Running beyond testing
 The classifier itself is implemented in a scikit-learn decision tree model, with a normalizing scaler. You can run it by loading the model and scaler from the `classifier/` directory using joblib.
