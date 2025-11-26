@@ -6,8 +6,6 @@ This module provides functions for analyzing URL posting patterns in social medi
 
 import pandas as pd
 from urllib.parse import urlparse
-from sdv.single_table import GaussianCopulaSynthesizer
-from sdv.metadata import Metadata
 import asyncio
 from fetch_users import get_follower_ratios
 
@@ -387,6 +385,7 @@ def augment_data(
         DataFrame with synthetic data (does not include original data)
     """
     from sdv.single_table import CTGANSynthesizer
+    from sdv.metadata import Metadata
     
     original_data = dataframe[feature_columns + [target_column]].copy()
     
@@ -405,36 +404,10 @@ def augment_data(
         metadata.update_column(column_name=target_column, sdtype='categorical')
         
         # Use CTGAN for better handling of non-Gaussian distributions
-        try:
-            synthesizer = CTGANSynthesizer(metadata, epochs=300, verbose=False)
-            synthesizer.fit(class_data)
-            synthetic_class = synthesizer.sample(num_rows=num_synthetic_rows)
-        except Exception:
-            # Fallback to GaussianCopula if CTGAN fails
-            synthesizer = GaussianCopulaSynthesizer(metadata)
-            synthesizer.fit(class_data)
-            synthetic_class = synthesizer.sample(num_rows=num_synthetic_rows)
+        synthesizer = CTGANSynthesizer(metadata, epochs=300, verbose=False)
+        synthesizer.fit(class_data)
+        synthetic_class = synthesizer.sample(num_rows=num_synthetic_rows)
         
         synthetic_parts.append(synthetic_class)
     
     return pd.concat(synthetic_parts, ignore_index=True)
-
-
-if __name__ == '__main__':
-    # Example usage
-    results = full_analysis_pipeline()
-    
-    print("=== Comprehensive Author Statistics ===")
-    print(results['author_stats'].head(10))
-    print(f"\nTotal authors analyzed: {len(results['author_stats'])}")
-    
-    print("\n=== Suspicious Authors ===")
-    print(results['suspicious_authors'].head(10))
-    print(f"\nTotal suspicious authors found: {len(results['suspicious_authors'])}")
-    
-    print("\n=== Top Frequent URLs ===")
-    print(results['url_stats'].head(20))
-    
-    print("\n=== Bursty URLs ===")
-    print(results['bursty_urls'].head(20))
-    print(f"\nTotal bursty URLs found: {len(results['bursty_urls'])}")

@@ -277,7 +277,7 @@ def show_classifier_page():
     """)
     
     # Import classifier functions
-    from run_tests import (
+    from policy_proposal_labeler import (
         load_model, 
         run_inference,
         compute_stats,
