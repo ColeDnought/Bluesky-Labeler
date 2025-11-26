@@ -8,4 +8,4 @@ streamlit
 pandas
 scikit-learn
 matplotlib
-sdv
+tqdm
